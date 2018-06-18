@@ -1,1 +1,1 @@
-{ "mqtt_server": "192.168.0.1", "mqtt_port": 1883, "mqtt_topic": "default", "blynk_token": "" }
+{ "mqtt_server": "192.168.0.1", "mqtt_port": 1883, "mqtt_topic": "ledstrip", "blynk_server": "blynk-cloud.com", "blynk_port": 8442, "blynk_token": "" }

@@ -46,9 +46,10 @@
  * turn off. To turn on again you can press the button or modify the value of
  * the potentiometer.
  *
- * When not configuration, AP "Driver 5050" is started to establish the
- * Network configuration to connect to the Internet. Additionally, it allows to
- * configure the Host, port and topic of the MQTT server and the Blynk Token.
+ * When not configuration, AP "Driver 5050" with pass "ledstrip" is started to
+ * establish the Network configuration to connect to the Internet. Additionally,
+ * it allows to configure the Host, port and topic of the MQTT server and
+ * the Blynk Token.
  *
  * You can send instructions through the Blynk application using the following
  * virtual pins (virtual pin: Widget [description]):
@@ -106,13 +107,15 @@
 char mqtt_server[40];
 char mqtt_port[6];
 char mqtt_topic[50];
+char blynk_server[40];
+char blynk_port[6];
 char blynk_token[34];
 
 //flag for saving data
 bool shouldSaveConfig = false;
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
 
 long mqttLastMsg = 0;
 long mqttLastConnect = 0;
@@ -124,42 +127,53 @@ long mqttLastConnect = 0;
 // It allows to avoid that small variations of voltage turn on the light
 #define THRESHOLD_FOR_TURN_ON 100
 
-const uint8_t red_pin = D4;
-const uint8_t green_pin = D8;
-const uint8_t btn_mode_pin = D3;
-const uint8_t blue_pin = D5;
-const uint8_t white_pin = D2;
-const uint8_t pot_color_pin = A0;
+const uint8_t RED_PIN = D2;
+const uint8_t GREEN_PIN = D1;
+const uint8_t BTN_MODE_PIN = D3;
+const uint8_t BLUE_PIN = D7;
+const uint8_t WHITE_PIN = D6;
+const uint8_t POT_COLOR_PIN = A0;
+
+const char CONFIG_FILE[] = "/config.json";
+const char KEY_MQTT_SERVER[] = "mqtt_server";
+const char KEY_MQTT_PORT[] = "mqtt_port";
+const char KEY_MQTT_TOPIC[] = "mqtt_topic";
+const char KEY_BLYNK_SERVER[] = "blynk_server";
+const char KEY_BLYNK_PORT[] = "blynk_port";
+const char KEY_BLYNK_TOKEN[] = "blynk_token";
 
 // Set a default color for the color mode
-const uint32_t default_color = COLOR_DARKPURPLE;
+const uint32_t DEFAULT_COLOR = COLOR_DARKPURPLE;
+uint32_t last_color = COLOR_WHITE;
 
 // Allows validation if there is a change in voltage
 uint16_t last_pot_color_value = 1;
 
 // Instance that allows to handle the RGB leds of the strip of leds
-LedStripRGB led_strip_rgb({ red_pin, green_pin, blue_pin });
+LedStripRGB led_strip_rgb({ RED_PIN, GREEN_PIN, BLUE_PIN });
 // Instance that allows to handle the led of white light of the strip of leds
-LedStrip led_strip_w(white_pin);
+LedStrip led_strip_w(WHITE_PIN);
 
 // Callback notifying us of the need to save config
 void saveConfigCallback () {
-  Serial.println("Should save config");
+  Serial.println(F("Should save config."));
   shouldSaveConfig = true;
 }
 
 void saveConfig() {
-  Serial.println("Saving config");
+  Serial.println(F("Saving config... "));
   DynamicJsonBuffer jsonBuffer;
   JsonObject& json = jsonBuffer.createObject();
-  json["mqtt_server"] = mqtt_server;
-  json["mqtt_port"] = mqtt_port;
-  json["mqtt_topic"] = mqtt_topic;
-  json["blynk_token"] = blynk_token;
+  json[KEY_MQTT_SERVER] = mqtt_server;
+  json[KEY_MQTT_PORT] = mqtt_port;
+  json[KEY_MQTT_TOPIC] = mqtt_topic;
+  json[KEY_BLYNK_SERVER] = blynk_server;
+  json[KEY_BLYNK_PORT] = blynk_port;
+  json[KEY_BLYNK_TOKEN] = blynk_token;
 
-  File configFile = SPIFFS.open("/config.json", "w");
+  File configFile = SPIFFS.open(CONFIG_FILE, "w");
   if (!configFile) {
-    Serial.println("Failed to open config file for writing");
+    Serial.println(F("Failed to open config file for writing"));
   }
 
   json.printTo(Serial);
@@ -170,13 +184,13 @@ void saveConfig() {
 
 void mountFS() {
   if (SPIFFS.begin()) {
-    Serial.println("Mounted file system");
-    if (SPIFFS.exists("/config.json")) {
+    Serial.println(F("Mounted file system"));
+    if (SPIFFS.exists(CONFIG_FILE)) {
       //file exists, reading and loading
-      Serial.println("Reading config file");
-      File configFile = SPIFFS.open("/config.json", "r");
+      Serial.println(F("Reading config file..."));
+      File configFile = SPIFFS.open(CONFIG_FILE, "r");
       if (configFile) {
-        Serial.println("Opened config file");
+        Serial.println(F("Opened config file..."));
         size_t size = configFile.size();
         // Allocate a buffer to store contents of the file.
         std::unique_ptr<char[]> buf(new char[size]);
@@ -186,20 +200,22 @@ void mountFS() {
         JsonObject& json = jsonBuffer.parseObject(buf.get());
         json.printTo(Serial);
         if (json.success()) {
-          Serial.println("\nparsed json");
+          Serial.println(F("\nparsed json..."));
 
-          strcpy(mqtt_server, json["mqtt_server"]);
-          strcpy(mqtt_port, json["mqtt_port"]);
-          strcpy(mqtt_topic, json["mqtt_topic"]);
-          strcpy(blynk_token, json["blynk_token"]);
+          strcpy(mqtt_server, json[KEY_MQTT_SERVER]);
+          strcpy(mqtt_port, json[KEY_MQTT_PORT]);
+          strcpy(mqtt_topic, json[KEY_MQTT_TOPIC]);
+          strcpy(blynk_server, json[KEY_BLYNK_SERVER]);
+          strcpy(blynk_port, json[KEY_BLYNK_PORT]);
+          strcpy(blynk_token, json[KEY_BLYNK_TOKEN]);
 
         } else {
-          Serial.println("failed to load json config");
+          Serial.println(F("failed to load json config"));
         }
       }
     }
   } else {
-    Serial.println("Failed to mount FS");
+    Serial.println(F("Failed to mount FS"));
   }
 }
 
@@ -242,7 +258,8 @@ String getState()
     rgb["state"] = "OFF";
     rgb["mode"] = "";
   }
-  rgb["color"] = led_strip_rgb.getColor();
+  RGBColor c = led_strip_rgb.getRGBColor();
+  rgb["color"] = "#" + String(c.red, HEX) + String(c.green, HEX) + String(c.blue, HEX);
 
   String json;
   root.printTo(json);
@@ -262,7 +279,7 @@ void mqttSendTele() {
     char payload[json.length() + 1];
     json.toCharArray(payload, json.length() + 1);
     Serial.printf("%s %s\r\n", topic, payload);
-    client.publish(topic, payload);
+    mqttClient.publish(topic, payload);
   }
 }
 
@@ -276,7 +293,7 @@ void mqttSendStat()
   char payload[json.length() + 1];
   json.toCharArray(payload, json.length() + 1);
   Serial.printf("%s %s\r\n", topic, payload);
-  client.publish(topic, payload);
+  mqttClient.publish(topic, payload);
 }
 
 WidgetLED whiteLed(V4);
@@ -380,32 +397,32 @@ void mqttConnect() {
   if (now - mqttLastConnect > MQTT_RETRY_CONNECT_INTERVAL)
   {
     mqttLastConnect = millis();
-    Serial.print("Attempting MQTT connection...");
+    Serial.print(F("Attempting MQTT connection..."));
     // Create a random client ID
     String clientId = "ESP8266Client-";
     clientId += String(random(0xffff), HEX);
     // Attempt to connect
-    if (client.connect(clientId.c_str())) {
-      Serial.println("Connected");
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println(F("Connected"));
       // Once connected, publish an announcement...
       char teleTopic[] = "/tele/LWT";
       char topic[sizeof(mqtt_topic) + sizeof(teleTopic) + 1];
       sprintf(topic, "%s%s", mqtt_topic, teleTopic);
       Serial.printf("%s ONLINE\r\n", topic);
-      client.publish(topic, "ONLINE");
+      mqttClient.publish(topic, "ONLINE");
       // ... and resubscribe
       char cmndTopic[] = "/cmnd/#";
       char subTopic[sizeof(mqtt_topic) + sizeof(cmndTopic) + 1];
       sprintf(subTopic, "%s%s", mqtt_topic, cmndTopic);
-      Serial.print("Subscribe to ");
+      Serial.print(F("Subscribe to "));
       Serial.println(subTopic);
-      client.subscribe(subTopic);
+      mqttClient.subscribe(subTopic);
     } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.print(" Try again in ");
+      Serial.print(F("failed, rc="));
+      Serial.print(mqttClient.state());
+      Serial.print(F(" Try again in "));
       Serial.print(MQTT_RETRY_CONNECT_INTERVAL / 1000);
-      Serial.println(" seconds");
+      Serial.println(F(" seconds"));
     }
   }
 }
@@ -490,9 +507,20 @@ void btnModeShortPressed(void)
   {
     led_strip_w.turnOn();
   }
-  else if(led_strip_rgb.getState() == LedStripState::OFF)
+  else if(led_strip_w.getState() == LedStripState::ON &&
+    led_strip_rgb.getState() == LedStripState::OFF)
+  {
+      led_strip_w.setIntensity(255);
+      last_color = led_strip_rgb.getColor();
+      led_strip_rgb.setColor(COLOR_WHITE);
+      led_strip_rgb.setMode(LedStripRgbMode::NORMAL);
+      led_strip_rgb.turnOn();
+  }
+  else if(led_strip_rgb.getMode() == LedStripRgbMode::NORMAL &&
+    led_strip_rgb.getColor() == COLOR_WHITE)
   {
     led_strip_w.turnOff();
+    led_strip_rgb.setColor(last_color);
     led_strip_rgb.turnOn();
   }
   else if(led_strip_rgb.getMode() == LedStripRgbMode::FADE)
@@ -528,7 +556,7 @@ void btnModeLongPressed(void)
 }
 
 // Instance to handle button press events.
-BtnHandler btn_mode(btn_mode_pin, btnModeShortPressed, btnModeLongPressed);
+BtnHandler btn_mode(BTN_MODE_PIN, btnModeShortPressed, btnModeLongPressed);
 
 // Function to calculate a color based on an input voltage.
 uint32_t color_mixer(uint16_t input_value)
@@ -575,7 +603,7 @@ uint32_t color_mixer(uint16_t input_value)
  */
 void readPotValue(void)
 {
-  uint16_t new_pot_value = analogRead(pot_color_pin);
+  uint16_t new_pot_value = analogRead(POT_COLOR_PIN);
   if((new_pot_value / 4) != last_pot_color_value)
   {
     last_pot_color_value = new_pot_value / 4;
@@ -646,84 +674,106 @@ void serialLoop() {
     Serial.println(command);
     if(command.startsWith("on"))
     {
-      Serial.println("Turn on");
+      Serial.println(F("Turn on"));
       led_strip_w.turnOn();
       led_strip_rgb.turnOff();
-    } else if(command.startsWith("off"))
+    }
+    else if(command.startsWith("off"))
     {
-      Serial.println("Turn off");
+      Serial.println(F("Turn off"));
       btnModeLongPressed();
-    } else if(command.startsWith("normal"))
+    }
+    else if(command.startsWith("normal"))
     {
-      Serial.println("Normal mode");
+      Serial.println(F("Normal mode"));
       led_strip_rgb.setMode(LedStripRgbMode::NORMAL);
       led_strip_rgb.turnOn();
-    } else if(command.startsWith("strobe"))
+    }
+    else if(command.startsWith("strobe"))
     {
-      Serial.println("Strobe mode");
+      Serial.println(F("Strobe mode"));
       led_strip_rgb.setMode(LedStripRgbMode::STROBE);
       led_strip_rgb.turnOn();
-    } else if(command.startsWith("flash"))
+    }
+    else if(command.startsWith("flash"))
     {
-      Serial.println("Flash mode");
+      Serial.println(F("Flash mode"));
       led_strip_rgb.setMode(LedStripRgbMode::FLASH);
       led_strip_rgb.turnOn();
-    } else if(command.startsWith("fade"))
+    }
+    else if(command.startsWith("fade"))
     {
-      Serial.println("Fade mode");
+      Serial.println(F("Fade mode"));
       led_strip_rgb.setMode(LedStripRgbMode::FADE);
       led_strip_rgb.turnOn();
-    } else if(command.startsWith("next"))
+    }
+    else if(command.startsWith("next"))
     {
-      Serial.println("Next mode");
-      btnModeLongPressed();
-    } else if(command.startsWith("color"))
+      Serial.println(F("Next mode"));
+      btnModeShortPressed();
+    }
+    else if(command.startsWith("color"))
     {
       command.remove(0, 7);
       uint32_t color = command.toInt();
-      Serial.print("Set color ");
+      Serial.print(F("Set color "));
       Serial.println(color, HEX);
       led_strip_rgb.setColor(command.toInt());
       led_strip_rgb.turnOn();
-    } else if(command.startsWith("mqttserver"))
+    }
+    else if(command.startsWith("mqttserver"))
     {
       command.remove(0, 10);
       command.trim();
-      Serial.print("Set MQTT server ");
+      Serial.print(F("Set MQTT server "));
       Serial.println(command);
       command.toCharArray(mqtt_server, 40);
       saveConfig();
-    } else if(command.startsWith("mqttport"))
+    }
+    else if(command.startsWith("mqttport"))
     {
       command.remove(0, 10);
       command.trim();
-      Serial.print("Set MQTT port ");
+      Serial.print(F("Set MQTT port "));
       Serial.println(command);
       command.toCharArray(mqtt_port, 6);
       saveConfig();
-    } else if(command.startsWith("mqtttopic"))
+    }
+    else if(command.startsWith("mqtttopic"))
     {
       command.remove(0, 11);
       command.trim();
-      Serial.print("Set MQTT topic ");
+      Serial.print(F("Set MQTT topic "));
       Serial.println(command);
       command.toCharArray(mqtt_topic, 50);
       saveConfig();
-    } else if(command.startsWith("token"))
+    }
+    else if(command.startsWith("blynkserver"))
+    {
+      command.remove(0, 12);
+      command.trim();
+      Serial.print(F("Set Blynk Server "));
+      Serial.println(command);
+      command.toCharArray(blynk_server, 40);
+      saveConfig();
+    }
+    else if(command.startsWith("blynkport"))
+    {
+      command.remove(0, 10);
+      command.trim();
+      Serial.print(F("Set Blynk Port "));
+      Serial.println(command);
+      command.toCharArray(blynk_port, 6);
+      saveConfig();
+    }
+    else if(command.startsWith("token"))
     {
       command.remove(0, 7);
       command.trim();
-      Serial.print("Set Blynk Token ");
+      Serial.print(F("Set Blynk Token "));
       Serial.println(command);
       command.toCharArray(blynk_token, 34);
       saveConfig();
-    /*} else if(command.startsWith("restart"))
-    {
-      Serial.println("Restart device...");
-      ESP.restart();
-    } else if(command.startsWith("reset")) {
-      Serial.println("Reset device...");
-      ESP.reset();*/
     }
     updateWidgets();
   }
@@ -739,20 +789,33 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
 
+  btn_mode.activateWith(LOW);
+  btn_mode.setup();
+  led_strip_w.setup();
+  led_strip_rgb.setup();
+
+  test_leds();
+
+  led_strip_w.turnOn();
+  led_strip_rgb.turnOff();
+  led_strip_rgb.setColor(DEFAULT_COLOR);
+
   //clean FS, for testing
   //SPIFFS.format();
 
   //read configuration from FS json
-  Serial.println("Mounting FS...");
+  Serial.println(F("Mounting FS..."));
   mountFS();
 
   // The extra parameters to be configured (can be either global or just in the setup)
   // After connecting, parameter.getValue() will get you the configured value
   // id/name placeholder/prompt default length
-  WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 6);
-  WiFiManagerParameter custom_mqtt_topic("topic", "mqtt topic", mqtt_topic, 50);
-  WiFiManagerParameter custom_blynk_token("blynk", "blynk token", blynk_token, 34);
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server", mqtt_server, 40);
+  WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", mqtt_port, 6);
+  WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Topic", mqtt_topic, 50);
+  WiFiManagerParameter custom_blynk_server("blynk_server", "Blynk Server", blynk_server, 40);
+  WiFiManagerParameter custom_blynk_port("blynk_port", "Blynk Port", blynk_port, 6);
+  WiFiManagerParameter custom_blynk_token("token", "Blynk Token", blynk_token, 34);
 
 
   //WiFiManager
@@ -766,6 +829,8 @@ void setup() {
   wifiManager.addParameter(&custom_mqtt_server);
   wifiManager.addParameter(&custom_mqtt_port);
   wifiManager.addParameter(&custom_mqtt_topic);
+  wifiManager.addParameter(&custom_blynk_server);
+  wifiManager.addParameter(&custom_blynk_port);
   wifiManager.addParameter(&custom_blynk_token);
 
   //reset saved settings
@@ -789,6 +854,8 @@ void setup() {
   strcpy(mqtt_server, custom_mqtt_server.getValue());
   strcpy(mqtt_port, custom_mqtt_port.getValue());
   strcpy(mqtt_topic, custom_mqtt_topic.getValue());
+  strcpy(blynk_server, custom_blynk_server.getValue());
+  strcpy(blynk_port, custom_blynk_port.getValue());
   strcpy(blynk_token, custom_blynk_token.getValue());
 
   //save the custom parameters to FS
@@ -797,25 +864,19 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println("Local IP");
-  Serial.println(WiFi.localIP());
 
-  client.setServer(mqtt_server, atoi(mqtt_port));
-  client.setCallback(mqttCallback);
+  mqttClient.setServer(mqtt_server, atoi(mqtt_port));
+  mqttClient.setCallback(mqttCallback);
 
-  Blynk.config(blynk_token);
-  Blynk.begin(blynk_token, WiFi.SSID().c_str(), WiFi.psk().c_str());
-
-  btn_mode.activateWith(LOW);
-  btn_mode.setup();
-  led_strip_w.setup();
-  led_strip_rgb.setup();
-
-  test_leds();
-
-  led_strip_w.turnOn();
-  led_strip_rgb.turnOff();
-  led_strip_rgb.setColor(default_color);
+  Blynk.config(blynk_token, blynk_server, atoi(blynk_port));
+  Blynk.connectWiFi(WiFi.SSID().c_str(), WiFi.psk().c_str());
+  int counter = 0;
+  do
+  {
+    Serial.print("Connecting to the Blynk Server, try number ");
+    Serial.println(++counter);
+    Blynk.connect();
+  } while(!Blynk.connected() && counter < 4);
 }
 
 /**
@@ -829,10 +890,10 @@ void loop() {
   btn_mode.loop();
   led_strip_rgb.loop();
 
-  if (!client.connected()) {
+  if (!mqttClient.connected()) {
     mqttConnect();
   }
-  client.loop();
+  mqttClient.loop();
   mqttSendTele();
 
   Blynk.run();
